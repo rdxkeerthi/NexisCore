@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -39,7 +40,7 @@ type InterceptResponse struct {
 	PIDLocked int             `json:"pid_locked,omitempty"`
 }
 
-// TelemetryMetrics defines analytics payload returned on /api/v1/metrics
+// TelemetryMetrics defines analytics payload returned on /api/v1/telemetry
 type TelemetryMetrics struct {
 	BlockedNetworkBreaches int64 `json:"blocked_network_breaches"`
 	BlockedFileBypasses    int64 `json:"blocked_file_bypasses"`
@@ -54,9 +55,13 @@ var (
 	// Telemetry variables
 	VerifiedSignaturesCount int64
 	ActiveSandboxesCount    int64
+
+	// Precompiled optimized regex lexers to enforce strict alpha-numeric constraints
+	variableKeyRegex   = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
+	variableValueRegex = regexp.MustCompile(`^[\x20-\x7E\t\n\r]*$`)
 )
 
-// scrubInput cleans script contents and variables (recursively scrubbing strings and arrays)
+// scrubInput cleans script contents and variables recursively using optimized regex lexers
 func scrubInput(script string, variables map[string]interface{}) (string, map[string]interface{}, error) {
 	if strings.Contains(script, "\x00") {
 		return "", nil, errors.New("script contains dangerous null byte characters")
@@ -64,48 +69,48 @@ func scrubInput(script string, variables map[string]interface{}) (string, map[st
 
 	scrubbedVars := make(map[string]interface{})
 	for k, v := range variables {
-		cleanKey := sanitizeString(k)
-		if cleanKey == "" {
-			return "", nil, errors.New("variable key contains invalid control characters or is empty")
+		// Enforce strict variable key checks using precompiled regex
+		if !variableKeyRegex.MatchString(k) {
+			return "", nil, fmt.Errorf("variable key '%s' violates strict security alphanumeric rules", k)
 		}
 
 		switch val := v.(type) {
 		case string:
+			if len(val) > 1024 {
+				return "", nil, fmt.Errorf("variable string value for key '%s' exceeds maximum allowed length of 1024 bytes", k)
+			}
 			if strings.Contains(val, "\x00") {
 				return "", nil, fmt.Errorf("variable string value for key '%s' contains null bytes", k)
 			}
-			scrubbedVars[cleanKey] = sanitizeString(val)
+			if !variableValueRegex.MatchString(val) {
+				return "", nil, fmt.Errorf("variable value for key '%s' contains disallowed control characters", k)
+			}
+			scrubbedVars[k] = val
 		case []interface{}:
 			var scrubbedArray []interface{}
 			for i, item := range val {
 				if strItem, ok := item.(string); ok {
+					if len(strItem) > 1024 {
+						return "", nil, fmt.Errorf("array element at index %d in key '%s' exceeds maximum allowed length of 1024 bytes", i, k)
+					}
 					if strings.Contains(strItem, "\x00") {
 						return "", nil, fmt.Errorf("array element at index %d in key '%s' contains null bytes", i, k)
 					}
-					scrubbedArray = append(scrubbedArray, sanitizeString(strItem))
+					if !variableValueRegex.MatchString(strItem) {
+						return "", nil, fmt.Errorf("array element at index %d in key '%s' violates strict character boundaries", i, k)
+					}
+					scrubbedArray = append(scrubbedArray, strItem)
 				} else {
 					scrubbedArray = append(scrubbedArray, item)
 				}
 			}
-			scrubbedVars[cleanKey] = scrubbedArray
+			scrubbedVars[k] = scrubbedArray
 		default:
-			scrubbedVars[cleanKey] = v
+			scrubbedVars[k] = v
 		}
 	}
 
 	return script, scrubbedVars, nil
-}
-
-// sanitizeString removes ASCII control characters
-func sanitizeString(in string) string {
-	var sb strings.Builder
-	for _, r := range in {
-		if r < 32 && r != '\t' && r != '\n' && r != '\r' {
-			continue // ignore unsafe control chars
-		}
-		sb.WriteRune(r)
-	}
-	return sb.String()
 }
 
 func handleIntercept(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +122,6 @@ func handleIntercept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read raw request body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -134,7 +138,7 @@ func handleIntercept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Scrub script and payload arrays before processing
+	// 1. Scrub script and payload arrays using regex lexer
 	scrubbedScript, scrubbedVars, err := scrubInput(req.Script, req.Variables)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -153,7 +157,6 @@ func handleIntercept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Assert bounds checks on manifest parameters
 	if manifest.Nonce == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(InterceptResponse{Success: false, Message: "Manifest contains empty nonce field"})
@@ -209,14 +212,18 @@ func handleIntercept(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleMetrics(w http.ResponseWriter, r *http.Header) {
-	// Dummy for route signature, will handle via helper in http routing
-}
-
 func main() {
 	log.Println("=== Starting NexisCore Zero-Trust Gateway Server ===")
 
-	// 1. Initialise the asymmetric cryptographic verifier using local PEM key
+	// 1. Initialize programmatic native Go-eBPF mapping engine and link controllers
+	if err := ebpf.InitNativeController(); err != nil {
+		log.Printf("[WARNING] eBPF System Initialization bypassed (requires root context): %v", err)
+	} else {
+		log.Println("[+] Native eBPF System Controller initialized programmatically.")
+		defer ebpf.CloseNativeController()
+	}
+
+	// 2. Initialise the asymmetric cryptographic verifier using local PEM key
 	var err error
 	provValidator, err = validator.NewProvenanceValidator("public_key.pem", 5*time.Minute)
 	if err != nil {
@@ -224,35 +231,40 @@ func main() {
 	}
 	log.Println("[+] Provenance Validator initialized (public_key.pem loaded, 5m sliding window TTL).")
 
-	// 2. Initialize Sandbox Manager using python-slim
+	// 3. Initialize Sandbox Manager using python-slim
 	sandboxManager = sandbox.NewSandboxManager("python:3.10-slim")
 	log.Println("[+] Sandbox Manager initialized targeting python:3.10-slim on gVisor runsc.")
 
-	// 3. Launch native BPF ring buffer telemetry streaming listener as background daemon
+	// 4. Launch native BPF ring buffer telemetry streaming listener as background daemon
 	go ebpf.StreamKernelAlerts()
 
-	// 4. Mount Routes
+	// 5. Mount Routes
 	http.HandleFunc("/api/v1/intercept", handleIntercept)
-	http.HandleFunc("/api/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+	
+	// Deprecated /api/v1/metrics in favor of /api/v1/telemetry
+	telemetryHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
 			return
 		}
-		
-		metrics := TelemetryMetrics{
+
+		telemetry := TelemetryMetrics{
 			BlockedNetworkBreaches: atomic.LoadInt64(&ebpf.BlockedNetworkBreaches),
 			BlockedFileBypasses:    atomic.LoadInt64(&ebpf.BlockedFileBypasses),
 			VerifiedSignatures:     atomic.LoadInt64(&VerifiedSignaturesCount),
 			ActiveSandboxes:        atomic.LoadInt64(&ActiveSandboxesCount),
 		}
-		
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(metrics)
-	})
 
-	// 5. Expose secure listener on 127.0.0.1:9090
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(telemetry)
+	}
+
+	http.HandleFunc("/api/v1/metrics", telemetryHandler)
+	http.HandleFunc("/api/v1/telemetry", telemetryHandler)
+
+	// 6. Expose secure listener on 127.0.0.1:9090
 	address := "127.0.0.1:9090"
 	log.Printf("[+] Interception service listening on %s...", address)
 	if err := http.ListenAndServe(address, nil); err != nil {

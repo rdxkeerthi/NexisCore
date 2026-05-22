@@ -29,6 +29,9 @@ public_key.pem
 local_go/
 
 # eBPF Intermediate Objects & Compiled Bytecode
+ebpf/kernel/monitor.c
+ebpf/kernel/monitor.o
+ebpf/kernel/firewall.bpf.o
 ebpf/*.o
 ebpf/monitor.c
 ebpf/monitor.o

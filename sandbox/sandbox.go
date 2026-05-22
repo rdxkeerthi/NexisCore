@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nexiscore/ebpf"
 )
 
 // Result represents the execution output of the sandbox
@@ -87,8 +89,13 @@ func (sm *SandboxManager) Execute(scriptCode string, onPIDAcquired func(pid int)
 	} else {
 		_, _ = fmt.Fprintln(os.Stderr, "WARNING: gVisor runtime 'runsc' not configured/available in Docker. Falling back to default runtime.")
 	}
+	networkMode := "bridge"
+	if !ebpf.IsActive() {
+		networkMode = "none"
+	}
+
 	args = append(args,
-		"--network=none",
+		"--network="+networkMode,
 		"--memory=512m",
 		"-v", fmt.Sprintf("%s:/app:ro", scratchDir),
 		sm.imageName,
