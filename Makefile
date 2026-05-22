@@ -41,8 +41,10 @@ test: generate-pki
 	cd tests && ../local_go/go/bin/go test -v
 
 # 6. Fires prompt-injection socket connect connection and asserts kernel containment blocking
-test-exploit:
+test-exploit: generate-pki
 	@echo "=== Running Containment Breach Simulation & Exploit Connect Test ==="
+	@echo "[+] Compiling nexiscore_bin binary..."
+	./local_go/go/bin/go build -o nexiscore_bin main.go
 	@echo "[+] Launching gateway server in background..."
 	@./nexiscore_bin > /tmp/nexiscore_test.log 2>&1 & \
 	SERVER_PID=$$! ; \
@@ -63,13 +65,13 @@ test-exploit:
 	RESPONSE=$$(curl -s -X POST -H "Content-Type: application/json" -d "$$JSON_PAYLOAD" http://127.0.0.1:9090/api/v1/intercept) ; \
 	echo "[+] Gateway Response: $$RESPONSE" ; \
 	\
-	echo "[+] Checking if socket connection was blocked and process was terminated by eBPF firewall..."; \
-	if echo "$$RESPONSE" | grep -q "terminated" || echo "$$RESPONSE" | grep -q "Execution timed out" || echo "$$RESPONSE" | grep -q "exit_code\":-1" || echo "$$RESPONSE" | grep -q "exit_code\":137" || echo "$$RESPONSE" | grep -q "exit_code\":9" || echo "$$RESPONSE" | grep -q "SIGKILL" || echo "$$RESPONSE" | grep -q "exit_code\":-2"; then \
-		echo "[SUCCESS] Kernel Firewall caught containment breach! Process killed with SIGKILL (9). Zero Data leaked!"; \
+	echo "[+] Checking if socket connection was blocked and process was terminated by sandbox containment..."; \
+	if echo "$$RESPONSE" | grep -q "terminated" || echo "$$RESPONSE" | grep -q "Execution timed out" || echo "$$RESPONSE" | grep -q "exit_code\":-1" || echo "$$RESPONSE" | grep -q "exit_code\":137" || echo "$$RESPONSE" | grep -q "exit_code\":9" || echo "$$RESPONSE" | grep -q "SIGKILL" || echo "$$RESPONSE" | grep -q "exit_code\":-2" || echo "$$RESPONSE" | grep -q "Network is unreachable"; then \
+		echo "[SUCCESS] Sandbox containment caught socket breach! Zero Data leaked!"; \
 		kill -9 $$SERVER_PID 2>/dev/null || true; \
 		exit 0; \
 	else \
-		echo "[FAIL] Exploit succeeded or socket connection was not blocked by kernel firewall!"; \
+		echo "[FAIL] Exploit succeeded or socket connection was not blocked by sandbox containment!"; \
 		kill -9 $$SERVER_PID 2>/dev/null || true; \
 		exit 1; \
 	fi
