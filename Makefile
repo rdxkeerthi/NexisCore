@@ -4,9 +4,9 @@
 # 1. Compile BPF Kernel Firewall binary payload
 build-ebpf:
 	@echo "=== Compiling eBPF Kernel firewall bytecode ==="
-	@cp -f ebpf/firewall.bpf.c ebpf/monitor.c
-	clang -O2 -target bpf -D__TARGET_ARCH_x86 -I/usr/include -I/usr/include/x86_64-linux-gnu -c ebpf/monitor.c -o ebpf/monitor.o
-	@echo "[SUCCESS] eBPF Object successfully compiled to ebpf/monitor.o"
+	@cp -f ebpf/kernel/firewall.bpf.c ebpf/kernel/monitor.c
+	clang -O2 -target bpf -D__TARGET_ARCH_x86 -I/usr/include -I/usr/include/x86_64-linux-gnu -Iebpf/kernel -c ebpf/kernel/monitor.c -o ebpf/kernel/monitor.o
+	@echo "[SUCCESS] eBPF Object successfully compiled to ebpf/kernel/monitor.o"
 
 # 2. Mount and pin driver into the host operating system trace kernel pipelines
 load-ebpf: build-ebpf
@@ -18,7 +18,7 @@ load-ebpf: build-ebpf
 	sudo rm -f /sys/fs/bpf/nexis_connect
 	sudo rm -rf /sys/fs/bpf/maps
 	sudo mkdir -p /sys/fs/bpf/maps
-	sudo bpftool prog load ebpf/monitor.o /sys/fs/bpf/nexis_connect type tracepoint pinmaps /sys/fs/bpf/maps
+	sudo bpftool prog load ebpf/kernel/monitor.o /sys/fs/bpf/nexis_connect type tracepoint pinmaps /sys/fs/bpf/maps
 	@echo "[SUCCESS] Pinned Maps directory structure created."
 	@echo "[SUCCESS] eBPF driver loaded successfully to /sys/fs/bpf/nexis_connect"
 
@@ -78,4 +78,4 @@ clean:
 	@echo "=== Cleaning environment logs and binaries ==="
 	rm -rf certs/
 	rm -f public_key.pem nexiscore_bin generate_keys_bin
-	rm -f ebpf/monitor.c ebpf/monitor.o ebpf/firewall.bpf.o
+	rm -f ebpf/kernel/monitor.c ebpf/kernel/monitor.o ebpf/kernel/firewall.bpf.o

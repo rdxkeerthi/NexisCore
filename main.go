@@ -1,17 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"nexiscore/ebpf"
 	"nexiscore/sandbox"
 	"nexiscore/validator"
 )
@@ -33,15 +33,27 @@ type ManifestStructure struct {
 
 // InterceptResponse defines the HTTP JSON response format
 type InterceptResponse struct {
-	Success    bool            `json:"success"`
-	Message    string          `json:"message,omitempty"`
-	Output     *sandbox.Result `json:"output,omitempty"`
-	PIDLocked  int             `json:"pid_locked,omitempty"`
+	Success   bool            `json:"success"`
+	Message   string          `json:"message,omitempty"`
+	Output    *sandbox.Result `json:"output,omitempty"`
+	PIDLocked int             `json:"pid_locked,omitempty"`
+}
+
+// TelemetryMetrics defines analytics payload returned on /api/v1/metrics
+type TelemetryMetrics struct {
+	BlockedNetworkBreaches int64 `json:"blocked_network_breaches"`
+	BlockedFileBypasses    int64 `json:"blocked_file_bypasses"`
+	VerifiedSignatures     int64 `json:"verified_signatures"`
+	ActiveSandboxes        int64 `json:"active_sandboxes"`
 }
 
 var (
 	provValidator  *validator.ProvenanceValidator
 	sandboxManager *sandbox.SandboxManager
+
+	// Telemetry variables
+	VerifiedSignaturesCount int64
+	ActiveSandboxesCount    int64
 )
 
 // scrubInput cleans script contents and variables (recursively scrubbing strings and arrays)
@@ -94,67 +106,6 @@ func sanitizeString(in string) string {
 		sb.WriteRune(r)
 	}
 	return sb.String()
-}
-
-// lockPIDInFirewall uses bpftool to insert the active sandbox process PID into the eBPF hash map
-func lockPIDInFirewall(pid int) error {
-	pid32 := uint32(pid)
-	
-	// Format PID bytes in Little Endian for bpftool hex arguments
-	keyBytes := []string{
-		fmt.Sprintf("0x%02x", byte(pid32)),
-		fmt.Sprintf("0x%02x", byte(pid32>>8)),
-		fmt.Sprintf("0x%02x", byte(pid32>>16)),
-		fmt.Sprintf("0x%02x", byte(pid32>>24)),
-	}
-
-	// Execution args for bpftool map update
-	// We use "sudo -n" to prevent blocking if sudo requires a password.
-	args := []string{
-		"-n",
-		"bpftool",
-		"map", "update",
-		"pinned", "/sys/fs/bpf/nexiscore_maps/locked_sandboxes",
-		"key", keyBytes[0], keyBytes[1], keyBytes[2], keyBytes[3],
-		"value", "0x01", "0x00", "0x00", "0x00",
-	}
-
-	log.Printf("[FIREWALL] Intercepting! Calling: sudo %s", strings.Join(args, " "))
-	
-	cmd := exec.Command("sudo", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		log.Printf("[WARNING] eBPF firewall map update failed (proceeding without block): %v (stderr: %s)", err, strings.TrimSpace(stderr.String()))
-		return nil
-	}
-
-	log.Printf("[FIREWALL] Locked container PID %d in kernel-level system call firewall map.", pid)
-	return nil
-}
-
-// unlockPIDInFirewall deletes the PID key from the eBPF firewall map
-func unlockPIDInFirewall(pid int) {
-	pid32 := uint32(pid)
-	keyBytes := []string{
-		fmt.Sprintf("0x%02x", byte(pid32)),
-		fmt.Sprintf("0x%02x", byte(pid32>>8)),
-		fmt.Sprintf("0x%02x", byte(pid32>>16)),
-		fmt.Sprintf("0x%02x", byte(pid32>>24)),
-	}
-
-	args := []string{
-		"-n",
-		"bpftool",
-		"map", "delete",
-		"pinned", "/sys/fs/bpf/nexiscore_maps/locked_sandboxes",
-		"key", keyBytes[0], keyBytes[1], keyBytes[2], keyBytes[3],
-	}
-
-	cmd := exec.Command("sudo", args...)
-	_ = cmd.Run() // silent deletion
 }
 
 func handleIntercept(w http.ResponseWriter, r *http.Request) {
@@ -223,20 +174,23 @@ func handleIntercept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	atomic.AddInt64(&VerifiedSignaturesCount, 1)
 	log.Printf("[GATEWAY] Provenance & Nonce verified successfully. Launching sandboxed worker...")
 
 	// 4. Sandboxed Execution with eBPF lock trigger
 	var targetPID int
+	atomic.AddInt64(&ActiveSandboxesCount, 1)
 	res, err := sandboxManager.Execute(scrubbedScript, func(pid int) error {
 		targetPID = pid
-		// Update eBPF map via bpftool prior to let the container execute tasks
-		return lockPIDInFirewall(pid)
+		// Update native eBPF map programmatically via pure-Go controller
+		return ebpf.RegisterSandboxPID(pid)
 	})
 
 	// Perform map cleanup after execution finishes
 	if targetPID > 0 {
-		defer unlockPIDInFirewall(targetPID)
+		_ = ebpf.RemoveSandboxPID(targetPID)
 	}
+	atomic.AddInt64(&ActiveSandboxesCount, -1)
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -255,6 +209,10 @@ func handleIntercept(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func handleMetrics(w http.ResponseWriter, r *http.Header) {
+	// Dummy for route signature, will handle via helper in http routing
+}
+
 func main() {
 	log.Println("=== Starting NexisCore Zero-Trust Gateway Server ===")
 
@@ -270,10 +228,31 @@ func main() {
 	sandboxManager = sandbox.NewSandboxManager("python:3.10-slim")
 	log.Println("[+] Sandbox Manager initialized targeting python:3.10-slim on gVisor runsc.")
 
-	// 3. Mount Routes
-	http.HandleFunc("/api/v1/intercept", handleIntercept)
+	// 3. Launch native BPF ring buffer telemetry streaming listener as background daemon
+	go ebpf.StreamKernelAlerts()
 
-	// 4. Expose secure listener on 127.0.0.1:9090
+	// 4. Mount Routes
+	http.HandleFunc("/api/v1/intercept", handleIntercept)
+	http.HandleFunc("/api/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			return
+		}
+		
+		metrics := TelemetryMetrics{
+			BlockedNetworkBreaches: atomic.LoadInt64(&ebpf.BlockedNetworkBreaches),
+			BlockedFileBypasses:    atomic.LoadInt64(&ebpf.BlockedFileBypasses),
+			VerifiedSignatures:     atomic.LoadInt64(&VerifiedSignaturesCount),
+			ActiveSandboxes:        atomic.LoadInt64(&ActiveSandboxesCount),
+		}
+		
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(metrics)
+	})
+
+	// 5. Expose secure listener on 127.0.0.1:9090
 	address := "127.0.0.1:9090"
 	log.Printf("[+] Interception service listening on %s...", address)
 	if err := http.ListenAndServe(address, nil); err != nil {
