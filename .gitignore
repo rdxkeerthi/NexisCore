@@ -1,0 +1,57 @@
+# NexisCore Professional Git Ignore Configurations
+
+# Binaries & Compiled Executables
+*_bin
+nexiscore_bin
+generate_keys_bin
+tools/keygen_bin
+tools/signer_bin
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Cryptographic Keys & Sensitive Credentials
+# (Never commit private keys, certificates, or PEM enclaves to source control)
+certs/
+*.pem
+*.key
+*.pub
+private_key.pem
+public_key.pem
+
+# Local Go Compiler & Packaged Runtimes
+local_go/
+
+# eBPF Intermediate Objects & Compiled Bytecode
+ebpf/*.o
+ebpf/monitor.c
+ebpf/monitor.o
+ebpf/firewall.bpf.o
+
+# Development & OS Junk
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Diagnostics & Logging Output
+*.log
+test_payload.json
