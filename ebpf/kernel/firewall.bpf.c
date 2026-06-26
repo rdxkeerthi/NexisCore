@@ -170,7 +170,7 @@ int socket__dns_filter(struct __sk_buff *skb) {
     if (bpf_skb_load_bytes(skb, offset, &label_len, 1) < 0) return -1;
     offset++;
 
-    #pragma unroll
+    #pragma unroll 64
     for (int i = 0; i < 64; i++) {
         if (label_len == 0) break;
 
@@ -199,7 +199,7 @@ int socket__dns_filter(struct __sk_buff *skb) {
     /* Query matching against Radix trie */
     struct dns_whitelist_key key = {0};
     key.prefixlen = 512; /* Exact bitwise match on 64-byte boundary */
-    #pragma unroll
+    #pragma unroll 64
     for (int i = 0; i < 64; i++) {
         key.name[i] = domain[i];
     }
@@ -214,7 +214,7 @@ int socket__dns_filter(struct __sk_buff *skb) {
     event.pid = pid;
     event.breach_type = 1; /* Egress Tampering */
     char default_comm[16] = "mcp_sandbox";
-    #pragma unroll
+    #pragma unroll 16
     for (int i = 0; i < 16; i++) {
         event.comm[i] = default_comm[i];
     }
@@ -252,7 +252,7 @@ int tracepoint__syscalls__sys_enter_connect(struct sys_enter_connect_args *ctx) 
             event.pid = pid;
             event.breach_type = 1; /* Egress Tampering */
             char default_comm[16] = "mcp_sandbox";
-            #pragma unroll
+            #pragma unroll 16
             for (int i = 0; i < 16; i++) {
                 event.comm[i] = default_comm[i];
             }
@@ -293,7 +293,7 @@ int tracepoint__syscalls__sys_enter_openat(struct openat_args *ctx) {
                 event.pid = pid;
                 event.breach_type = 2; /* File Boundary Abuse */
                 char default_comm[16] = "mcp_sandbox";
-                #pragma unroll
+                #pragma unroll 16
                 for (int i = 0; i < 16; i++) {
                     event.comm[i] = default_comm[i];
                 }

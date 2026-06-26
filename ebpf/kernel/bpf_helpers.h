@@ -29,5 +29,6 @@ static long (*bpf_probe_read_user_str)(void *dst, __u32 size, const void *unsafe
 static long (*bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) = (void *) 112;
 static long (*bpf_probe_read_kernel)(void *dst, __u32 size, const void *unsafe_ptr) = (void *) 113;
 static long (*bpf_skb_load_bytes)(const void *ctx, __u32 offset, void *to, __u32 len) = (void *) 26;
+static long (*bpf_get_current_comm)(void *buf, __u32 size_of_buf) = (void *) 16;
 
 #endif /* __BPF_HELPERS_H__ */
