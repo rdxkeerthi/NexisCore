@@ -16,7 +16,7 @@ Security is a core focus of NexisCore. If you discover a security vulnerability,
 Please **do not open a public issue** for security vulnerabilities.
 
 Instead, please send an email to:
-**`sambavam102@gmail.com`**
+**`keerthivasanm.student@saveetha.ac.in`**
 
 Include the following in your report:
 * Type of issue (e.g., buffer overflow, SQL injection, cross-site scripting, etc.)
