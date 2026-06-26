@@ -26,6 +26,19 @@ type SecurityEvent struct {
 	Comm                  [16]byte
 }
 
+/* AntiTamperEvent matches the anti_tamper_event_t struct in antitamper.bpf.c */
+type AntiTamperEvent struct {
+	PID        uint32
+	TGID       uint32
+	BreachType uint32 /* 3=PTRACE_ATTACH, 4=mprotect W^X, 5=shell spawn */
+	TargetPID  uint32
+	Comm       [16]byte
+}
+
+/* KillSwitchCallback is a function invoked when an anti-tamper event is detected.
+ * It bridges the ebpf package to the integrity package without creating an import cycle. */
+type KillSwitchCallback func(reason string, context map[string]string)
+
 /* LpmTrieKey matches structural prefix lookup key layout in eBPF LPM trie */
 type LpmTrieKey struct {
 	PrefixLen uint32
@@ -44,9 +57,22 @@ var (
 	controllerInitOnce sync.Once
 	controllerInitErr  error
 
+	/* Anti-tamper controller state */
+	antiTamperRingMap    *ebpf.Map
+	tracepointPtrace     link.Link
+	tracepointMprotect   link.Link
+	tracepointExecve     link.Link
+	antiTamperInitOnce   sync.Once
+	antiTamperInitErr    error
+	killSwitchCb         KillSwitchCallback
+	killSwitchCbMu       sync.RWMutex
+
 	/* Public Metrics */
 	BlockedNetworkBreaches int64
 	BlockedFileBypasses    int64
+	BlockedPtraceAttempts  int64
+	BlockedMprotectWX      int64
+	BlockedShellSpawns     int64
 )
 
 /* port-agnostic htons utility */
@@ -284,6 +310,164 @@ func StreamKernelAlerts() {
 	}
 }
 
+/* SetKillSwitchCallback registers a callback invoked when an anti-tamper breach
+ * event is received from the kernel. It bridges the ebpf and integrity packages. */
+func SetKillSwitchCallback(cb KillSwitchCallback) {
+	killSwitchCbMu.Lock()
+	defer killSwitchCbMu.Unlock()
+	killSwitchCb = cb
+}
+
+/* InitAntiTamperProbes loads antitamper.o and attaches ptrace, mprotect, and
+ * execve tracepoints. The locked_sandboxes map from the primary controller
+ * is reused so both sets of probes share sandbox membership data. */
+func InitAntiTamperProbes() error {
+	antiTamperInitOnce.Do(func() {
+		antiTamperInitErr = func() error {
+			log.Println("[ANTI-TAMPER] Loading antitamper.o eBPF collection...")
+
+			/* Ensure the primary controller is initialised first so locked_sandboxes exists */
+			if err := InitNativeController(); err != nil {
+				return fmt.Errorf("anti-tamper: primary controller init failed: %w", err)
+			}
+
+			pinDir := "/sys/fs/bpf/nexiscore_antitamper"
+			_ = os.RemoveAll(pinDir)
+			if err := os.MkdirAll(pinDir, 0755); err != nil {
+				return fmt.Errorf("anti-tamper: failed creating pin dir: %w", err)
+			}
+
+			spec, err := ebpf.LoadCollectionSpec("ebpf/kernel/antitamper.o")
+			if err != nil {
+				return fmt.Errorf("anti-tamper: failed loading antitamper.o: %w", err)
+			}
+
+			/* Reuse the already-pinned locked_sandboxes map from the primary controller */
+			if lockedMap != nil {
+				spec.Maps["locked_sandboxes"].Extra = nil
+			}
+
+			var objects struct {
+				AntiTamperEvents *ebpf.Map     `ebpf:"anti_tamper_events"`
+				LockedSandboxes  *ebpf.Map     `ebpf:"locked_sandboxes"`
+				PtraceProbe      *ebpf.Program `ebpf:"tracepoint__syscalls__sys_enter_ptrace"`
+				MprotectProbe    *ebpf.Program `ebpf:"tracepoint__syscalls__sys_enter_mprotect"`
+				ExecveProbe      *ebpf.Program `ebpf:"tracepoint__syscalls__sys_enter_execve"`
+			}
+
+			err = spec.LoadAndAssign(&objects, &ebpf.CollectionOptions{
+				Maps: ebpf.MapOptions{PinPath: pinDir},
+			})
+			if err != nil {
+				return fmt.Errorf("anti-tamper: LoadAndAssign failed: %w", err)
+			}
+
+			antiTamperRingMap = objects.AntiTamperEvents
+
+			tracepointPtrace, err = link.Tracepoint("syscalls", "sys_enter_ptrace", objects.PtraceProbe, nil)
+			if err != nil {
+				return fmt.Errorf("anti-tamper: failed attaching ptrace tracepoint: %w", err)
+			}
+
+			tracepointMprotect, err = link.Tracepoint("syscalls", "sys_enter_mprotect", objects.MprotectProbe, nil)
+			if err != nil {
+				return fmt.Errorf("anti-tamper: failed attaching mprotect tracepoint: %w", err)
+			}
+
+			tracepointExecve, err = link.Tracepoint("syscalls", "sys_enter_execve", objects.ExecveProbe, nil)
+			if err != nil {
+				return fmt.Errorf("anti-tamper: failed attaching execve tracepoint: %w", err)
+			}
+
+			log.Println("[ANTI-TAMPER] Anti-tamper probes active: ptrace, mprotect(W^X), execve(shell).")
+			return nil
+		}()
+	})
+	return antiTamperInitErr
+}
+
+/* StreamAntiTamperAlerts reads from the anti_tamper_events ring buffer and
+ * dispatches breach events to the registered KillSwitchCallback. Run as a
+ * goroutine alongside StreamKernelAlerts. */
+func StreamAntiTamperAlerts() {
+	if err := InitAntiTamperProbes(); err != nil {
+		log.Printf("[ANTI-TAMPER] Alert stream bypassed: %v", err)
+		return
+	}
+	if antiTamperRingMap == nil {
+		log.Println("[ANTI-TAMPER] Ring buffer nil, stream aborted.")
+		return
+	}
+
+	rd, err := ringbuf.NewReader(antiTamperRingMap)
+	if err != nil {
+		log.Printf("[ANTI-TAMPER] Failed creating ring buffer reader: %v", err)
+		return
+	}
+	defer rd.Close()
+
+	log.Println("[ANTI-TAMPER] Ring buffer alert stream active.")
+
+	for {
+		record, err := rd.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				log.Println("[ANTI-TAMPER] Ring buffer closed, stream stopping.")
+				return
+			}
+			log.Printf("[ANTI-TAMPER] Ring buffer read error: %v", err)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		var event AntiTamperEvent
+		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
+			log.Printf("[ANTI-TAMPER] Failed parsing event: %v", err)
+			continue
+		}
+
+		commStr := string(bytes.Trim(event.Comm[:], "\x00"))
+		ctx := map[string]string{
+			"pid":    fmt.Sprintf("%d", event.PID),
+			"tgid":   fmt.Sprintf("%d", event.TGID),
+			"comm":   commStr,
+		}
+
+		switch event.BreachType {
+		case 3:
+			atomic.AddInt64(&BlockedPtraceAttempts, 1)
+			ctx["target_pid"] = fmt.Sprintf("%d", event.TargetPID)
+			log.Printf("[🚨 ANTI-TAMPER] PTRACE_ATTACH blocked! PID=%d TGID=%d Comm=%s TargetPID=%d",
+				event.PID, event.TGID, commStr, event.TargetPID)
+			invokeKillSwitch("ptrace_attach_detected", ctx)
+		case 4:
+			atomic.AddInt64(&BlockedMprotectWX, 1)
+			log.Printf("[🚨 ANTI-TAMPER] mprotect(PROT_WRITE|PROT_EXEC) blocked! PID=%d Comm=%s",
+				event.PID, commStr)
+			invokeKillSwitch("mprotect_wx_detected", ctx)
+		case 5:
+			atomic.AddInt64(&BlockedShellSpawns, 1)
+			log.Printf("[🚨 ANTI-TAMPER] Shell spawn blocked! PID=%d Comm=%s",
+				event.PID, commStr)
+			invokeKillSwitch("shell_spawn_detected", ctx)
+		default:
+			log.Printf("[ANTI-TAMPER] Unknown breach type %d from PID=%d", event.BreachType, event.PID)
+		}
+	}
+}
+
+/* invokeKillSwitch calls the registered callback under a read lock. */
+func invokeKillSwitch(reason string, ctx map[string]string) {
+	killSwitchCbMu.RLock()
+	cb := killSwitchCb
+	killSwitchCbMu.RUnlock()
+	if cb != nil {
+		cb(reason, ctx)
+	} else {
+		log.Printf("[ANTI-TAMPER] No kill-switch callback registered; breach logged only: %s", reason)
+	}
+}
+
 /* CloseNativeController cleans up eBPF maps and socket handles */
 func CloseNativeController() {
 	if tracepointConn != nil {
@@ -291,6 +475,15 @@ func CloseNativeController() {
 	}
 	if tracepointOpenat != nil {
 		_ = tracepointOpenat.Close()
+	}
+	if tracepointPtrace != nil {
+		_ = tracepointPtrace.Close()
+	}
+	if tracepointMprotect != nil {
+		_ = tracepointMprotect.Close()
+	}
+	if tracepointExecve != nil {
+		_ = tracepointExecve.Close()
 	}
 	for _, fd := range socketFds {
 		_ = syscall.Close(fd)

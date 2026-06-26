@@ -1,0 +1,25 @@
+version: "1"
+# NexisCore Inter-Agent ACL Policy
+# ─────────────────────────────────────────────────────────────────────────────
+# Rules are evaluated top-to-bottom. The first matching rule wins.
+# Wildcard "*" in from/to matches any registered agent SPIFFE ID.
+# By default, no lateral agent-to-agent movement is permitted.
+# ─────────────────────────────────────────────────────────────────────────────
+routes:
+  # The supervisor agent (well-known identity) may reach any agent
+  - from: "spiffe://nexiscore.local/agent/supervisor"
+    to:   "*"
+    comment: "Supervisor has unrestricted routing authority"
+
+  # System introspection agent may broadcast to all
+  - from: "spiffe://nexiscore.local/agent/introspection"
+    to:   "*"
+    comment: "Introspection agent may read any agent state"
+
+  # ── Add explicit agent-to-agent routes below ───────────────────────────────
+  # Example: Allow agent-A to send context to agent-B:
+  # - from: "spiffe://nexiscore.local/agent/<uuid-a>"
+  #   to:   "spiffe://nexiscore.local/agent/<uuid-b>"
+  #   comment: "Agent A <-> Agent B context exchange"
+  #
+  # Default: all other inter-agent routes are DENIED (implicit deny)

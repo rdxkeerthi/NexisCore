@@ -79,7 +79,7 @@ func TestEndToEndInterceptPipeline(t *testing.T) {
 
 	// 2. Launch the main server hub on port 9090 as a background goroutine loop
 	t.Log("[+] Compiling and launching NexisCore Main Gateway Server on 127.0.0.1:9090...")
-	serverCmd := exec.Command("local_go/go/bin/go", "run", "main.go")
+	serverCmd := exec.Command("local_go/go/bin/go", "run", "main.go", "dashboard.go")
 	serverCmd.Dir = "../"
 	
 	// Create logs buffer

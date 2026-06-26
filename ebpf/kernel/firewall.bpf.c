@@ -131,29 +131,26 @@ static inline int starts_with(const char *str, const char *prefix, int prefix_le
 /* 1. eBPF Socket Filtering Program - Intercept outgoing DNS Queries */
 SEC("socket/dns_filter")
 int socket__dns_filter(struct __sk_buff *skb) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
     /* ETH header parsing */
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) return -1;
+    struct ethhdr eth;
+    if (bpf_skb_load_bytes(skb, 0, &eth, sizeof(eth)) < 0) return -1;
 
     /* IPv4 packets only */
-    if (eth->h_proto != bpf_htons(0x0800)) return -1;
+    if (eth.h_proto != bpf_htons(0x0800)) return -1;
 
     /* IP header parsing */
-    struct iphdr *ip = (struct iphdr *)(eth + 1);
-    if ((void *)(ip + 1) > data_end) return -1;
+    struct iphdr ip;
+    if (bpf_skb_load_bytes(skb, sizeof(eth), &ip, sizeof(ip)) < 0) return -1;
 
     /* UDP packets only */
-    if (ip->protocol != 17) return -1;
+    if (ip.protocol != 17) return -1;
 
     /* UDP header parsing */
-    struct udphdr *udp = (struct udphdr *)(ip + 1);
-    if ((void *)(udp + 1) > data_end) return -1;
+    struct udphdr udp;
+    if (bpf_skb_load_bytes(skb, sizeof(eth) + sizeof(ip), &udp, sizeof(udp)) < 0) return -1;
 
     /* UDP destination port 53 (DNS) queries only */
-    if (udp->dest != bpf_htons(53)) return -1;
+    if (udp.dest != bpf_htons(53)) return -1;
 
     /* Assert that process is a locked sandbox PID */
     __u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -164,38 +161,38 @@ int socket__dns_filter(struct __sk_buff *skb) {
         return -1; /* Pass unconstrained process network traffic */
     }
 
-    /* Parse DNS Query domain labels */
-    unsigned char *dns = (unsigned char *)(udp + 1);
-    if ((void *)(dns + 12) > data_end) return -1;
-
-    /* DNS name starts 12 bytes after UDP header (DNS Header size = 12) */
-    unsigned char *name_start = dns + 12;
+    /* Parse DNS Query domain labels starting at offset 54 */
     char domain[64] = {0};
     int domain_len = 0;
+    __u32 offset = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr) + 12; // 14 + 20 + 8 + 12 = 54
 
-    unsigned char *curr = name_start;
+    unsigned char label_len = 0;
+    if (bpf_skb_load_bytes(skb, offset, &label_len, 1) < 0) return -1;
+    offset++;
 
     #pragma unroll
     for (int i = 0; i < 64; i++) {
-        if ((void *)(curr + 1) > data_end) break;
-        unsigned char label_len = *curr;
         if (label_len == 0) break;
 
-        curr++; /* Skip length byte to start of label string */
+        // Read the next character
+        unsigned char c;
+        if (bpf_skb_load_bytes(skb, offset, &c, 1) < 0) break;
+        offset++;
 
-        if (domain_len > 0 && domain_len < 63) {
-            domain[domain_len] = '.';
+        if (domain_len < 63) {
+            domain[domain_len] = c;
             domain_len++;
         }
+        label_len--;
 
-        for (int j = 0; j < 63; j++) {
-            if (j >= label_len) break;
-            if ((void *)(curr + 1) > data_end) break;
-            if (domain_len < 63) {
-                domain[domain_len] = *curr;
+        if (label_len == 0) {
+            // Read the next label length
+            if (bpf_skb_load_bytes(skb, offset, &label_len, 1) < 0) break;
+            offset++;
+            if (label_len > 0 && domain_len < 63) {
+                domain[domain_len] = '.';
                 domain_len++;
             }
-            curr++;
         }
     }
 

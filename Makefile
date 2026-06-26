@@ -1,12 +1,19 @@
 # NexisCore Automated Lifecycle Build Makefile Runbook
-.PHONY: build-ebpf load-ebpf generate-pki run-system test-exploit clean test
+.PHONY: build-ebpf build-antitamper-ebpf load-ebpf generate-pki run-system run-full test-exploit clean test
 
-# 1. Compile BPF Kernel Firewall binary payload
+# 1a. Compile BPF Kernel Firewall binary payload
 build-ebpf:
 	@echo "=== Compiling eBPF Kernel firewall bytecode ==="
 	@cp -f ebpf/kernel/firewall.bpf.c ebpf/kernel/monitor.c
-	clang -O2 -target bpf -D__TARGET_ARCH_x86 -I/usr/include -I/usr/include/x86_64-linux-gnu -Iebpf/kernel -c ebpf/kernel/monitor.c -o ebpf/kernel/monitor.o
+	@rm -f ebpf/kernel/monitor.o
+	clang -g -O2 -target bpf -D__TARGET_ARCH_x86 -I/usr/include -I/usr/include/x86_64-linux-gnu -Iebpf/kernel -c ebpf/kernel/monitor.c -o ebpf/kernel/monitor.o
 	@echo "[SUCCESS] eBPF Object successfully compiled to ebpf/kernel/monitor.o"
+
+# 1b. Compile Anti-Tamper eBPF probes (ptrace/mprotect/execve)
+build-antitamper-ebpf:
+	@echo "=== Compiling Anti-Tamper eBPF probes ==="
+	clang -g -O2 -target bpf -D__TARGET_ARCH_x86 -I/usr/include -I/usr/include/x86_64-linux-gnu -Iebpf/kernel -c ebpf/kernel/antitamper.bpf.c -o ebpf/kernel/antitamper.o
+	@echo "[SUCCESS] Anti-tamper eBPF object compiled to ebpf/kernel/antitamper.o"
 
 # 2. Mount and pin driver into the host operating system trace kernel pipelines
 load-ebpf: build-ebpf
@@ -29,14 +36,20 @@ generate-pki:
 	@cp -f certs/public.pem public_key.pem
 	@echo "[SUCCESS] Public key copied to active gateway workspace runtime root."
 
-# 4. Compiles and launches active gateway hub server
-run-system: generate-pki
+# 4. Compiles and launches active gateway hub server (original)
+run-system: generate-pki build-ebpf
 	@echo "=== Starting NexisCore Active Interception Gateway ==="
-	./local_go/go/bin/go build -o nexiscore_bin main.go
+	./local_go/go/bin/go build -o nexiscore_bin main.go dashboard.go
+	./nexiscore_bin
+
+# 4b. Full system run with all 4 security modules (anti-tamper eBPF + full binary)
+run-full: generate-pki build-ebpf build-antitamper-ebpf
+	@echo "=== Starting NexisCore Enterprise Gateway (All 4 Modules Active) ==="
+	./local_go/go/bin/go build -o nexiscore_bin main.go dashboard.go
 	./nexiscore_bin
 
 # 5. E2E Go integration test runner
-test: generate-pki
+test: generate-pki build-ebpf
 	@echo "=== Running Go Integration Test suite ==="
 	cd tests && ../local_go/go/bin/go test -v
 
@@ -44,7 +57,7 @@ test: generate-pki
 test-exploit: generate-pki
 	@echo "=== Running Containment Breach Simulation & Exploit Connect Test ==="
 	@echo "[+] Compiling nexiscore_bin binary..."
-	./local_go/go/bin/go build -o nexiscore_bin main.go
+	./local_go/go/bin/go build -o nexiscore_bin main.go dashboard.go
 	@echo "[+] Launching gateway server in background..."
 	@./nexiscore_bin > /tmp/nexiscore_test.log 2>&1 & \
 	SERVER_PID=$$! ; \
@@ -81,3 +94,5 @@ clean:
 	rm -rf certs/
 	rm -f public_key.pem nexiscore_bin generate_keys_bin
 	rm -f ebpf/kernel/monitor.c ebpf/kernel/monitor.o ebpf/kernel/firewall.bpf.o
+	rm -f ebpf/kernel/antitamper.o
+	rm -f nexiscore_ocsf.jsonl siem_deadletter.jsonl

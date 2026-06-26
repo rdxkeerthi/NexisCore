@@ -1,0 +1,27 @@
+version: "1"
+# NexisCore Egress Allowlist Policy
+# ─────────────────────────────────────────────────────────────────────────────
+# Only domains listed here (and their subdomains) or CIDRs may receive
+# outbound traffic from NexisCore agents. All other destinations are blocked.
+# Reloaded from disk every 15 seconds without restart.
+# ─────────────────────────────────────────────────────────────────────────────
+allowed_domains:
+  # OpenAI API endpoints
+  - "api.openai.com"
+  - "openai.azure.com"
+  # Anthropic Claude API
+  - "api.anthropic.com"
+  # Google Gemini / PaLM API
+  - "generativelanguage.googleapis.com"
+  # Mistral AI
+  - "api.mistral.ai"
+  # Cohere AI
+  - "api.cohere.ai"
+
+allowed_cidrs:
+  # Loopback (localhost)
+  - "127.0.0.0/8"
+  - "::1/128"
+  # ── Add corporate egress ranges below ─────────────────────────────────────
+  # Example: corporate proxy CIDR
+  # - "10.0.0.0/8"
