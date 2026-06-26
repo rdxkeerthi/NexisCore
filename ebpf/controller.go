@@ -342,9 +342,11 @@ func InitAntiTamperProbes() error {
 				return fmt.Errorf("anti-tamper: failed loading antitamper.o: %w", err)
 			}
 
-			/* Reuse the already-pinned locked_sandboxes map from the primary controller */
+			var replacements map[string]*ebpf.Map
 			if lockedMap != nil {
-				spec.Maps["locked_sandboxes"].Extra = nil
+				replacements = map[string]*ebpf.Map{
+					"locked_sandboxes": lockedMap,
+				}
 			}
 
 			var objects struct {
@@ -356,7 +358,8 @@ func InitAntiTamperProbes() error {
 			}
 
 			err = spec.LoadAndAssign(&objects, &ebpf.CollectionOptions{
-				Maps: ebpf.MapOptions{PinPath: pinDir},
+				Maps:            ebpf.MapOptions{PinPath: pinDir},
+				MapReplacements: replacements,
 			})
 			if err != nil {
 				return fmt.Errorf("anti-tamper: LoadAndAssign failed: %w", err)
